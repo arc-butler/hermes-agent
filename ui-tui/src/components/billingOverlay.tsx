@@ -5,7 +5,7 @@ import type { BillingOverlayState } from '../app/interfaces.js'
 import type { BillingStateResponse } from '../gatewayTypes.js'
 import type { Theme } from '../theme.js'
 
-import { ActionRow, barCells, footer, MenuRow } from './overlayPrimitives.js'
+import { ActionRow, footer, MenuRow, UsageBars } from './overlayPrimitives.js'
 import { TextInput } from './textInput.js'
 
 interface BillingOverlayProps {
@@ -15,27 +15,6 @@ interface BillingOverlayProps {
   onClose: () => void
   overlay: BillingOverlayState
   t: Theme
-}
-
-/** 10-cell spend bar + percent (omit entirely when there's no usable cap). */
-function spendBar(s: BillingStateResponse): null | string {
-  const cap = s.monthly_cap
-
-  if (!cap || cap.limit_usd == null) {
-    return null
-  }
-
-  const limit = Number(cap.limit_usd)
-  const spent = Number(cap.spent_this_month_usd ?? '0')
-
-  if (!(limit > 0) || Number.isNaN(spent)) {
-    return null
-  }
-
-  const { bar, pct } = barCells(spent / limit)
-  const ceiling = cap.is_default_ceiling ? ' (default ceiling)' : ''
-
-  return `${cap.spent_display} of ${cap.limit_display} used   ${bar} ${pct}%${ceiling}`
 }
 
 function autoReloadLine(s: BillingStateResponse): null | string {
@@ -98,8 +77,12 @@ interface ScreenProps {
 }
 
 function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
-  // Gate: full menu only for an admin with the kill-switch on. Otherwise the
-  // menu collapses to Manage-on-portal / Cancel + a one-line note.
+  // Full charge menu only for an admin with the org kill-switch on; otherwise it
+  // collapses to Manage-on-portal / Close + a one-line note. NOTE: this is the
+  // ORG-level gate (cli_billing_enabled), NOT the per-terminal billing scope —
+  // that's discovered reactively at pay time (a charge 403s insufficient_scope
+  // and the confirm screen routes into the resumable step-up). We deliberately
+  // do NOT preflight the scope here.
   const full = s.is_admin && s.cli_billing_enabled
 
   const note = !s.is_admin
@@ -109,12 +92,14 @@ function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
       : null
 
   // Optimistic funnel: admin + kill-switch on but no saved card → a charge will
-  // 403 no_payment_method. Advise up front (Buy stays available — /state.card
-  // can't fully prove CLI-chargeability, so we hint rather than hide).
+  // 403 no_payment_method. Advise up front (Add funds stays available — the card
+  // field can't fully prove chargeability, so we hint rather than hide).
   const cardHint = full && !s.card ? 'No saved card for terminal charges yet — set one up on the portal first.' : null
 
+  // Add funds first, then settings, then the scopeless browser handoff. Dollars,
+  // never "credits". No "Enable terminal billing" item — see the note above.
   const items = full
-    ? ['Buy credits', 'Adjust auto-reload', 'Adjust monthly limit', 'Manage on portal', 'Cancel']
+    ? ['Add funds', 'Auto-reload', 'Monthly limit', 'Manage on portal', 'Cancel']
     : ['Manage on portal', 'Cancel']
 
   const [sel, setSel] = useState(0)
@@ -169,23 +154,25 @@ function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
     }
   })
 
-  const bar = spendBar(s)
   const auto = autoReloadLine(s)
+  // Balance leads, in the title — the first thing seen (review feedback).
+  const title = `Top up · balance ${s.balance_display}`
 
   return (
     <Box flexDirection="column">
       <Text bold color={t.color.accent}>
-        Top up credits
+        {title}
       </Text>
-      {bar && <Text color={t.color.text}>{bar}</Text>}
-      <Text color={t.color.text}>Balance: {s.balance_display}</Text>
-      {auto && <Text color={t.color.muted}>{auto}</Text>}
       {s.org_name && (
         <Text color={t.color.muted}>
           Org: {s.org_name}
           {s.role ? ` · ${s.role}` : ''}
         </Text>
       )}
+      {/* The shared two-bar dollar usage (plan + top-up), same as /usage and
+          /subscription. Renders nothing when no usage model is available. */}
+      <UsageBars model={s.usage} t={t} />
+      {auto && <Text color={t.color.muted}>{auto}</Text>}
       {note && (
         <Box marginTop={1}>
           <Text color={t.color.warn}>{note}</Text>
@@ -298,7 +285,7 @@ function BuyScreen({ ctx, onPatch, s, t }: ScreenProps) {
     return (
       <Box flexDirection="column">
         <Text bold color={t.color.accent}>
-          Buy usage credits
+          Add funds
         </Text>
         <Text color={t.color.muted}>{payLine}</Text>
         <Text />
@@ -317,7 +304,7 @@ function BuyScreen({ ctx, onPatch, s, t }: ScreenProps) {
   return (
     <Box flexDirection="column">
       <Text bold color={t.color.accent}>
-        Buy usage credits
+        Add funds
       </Text>
       <Text color={t.color.muted}>{payLine}</Text>
       <Text />
@@ -424,11 +411,14 @@ function ConfirmScreen({
   )
 }
 
-// ── Screen: Step-up (resumable "Allow Remote Spending") ───────────────
-// Reached when a charge returns insufficient_scope. The modal stays MOUNTED
-// through the browser device-flow: Allow → await the grant → replay the held
-// charge (pendingCharge.amount) without a command re-run. Never leaks the raw
-// billing:manage scope — the user-facing concept is "Remote Spending".
+// ── Screen: Step-up (resumable "Enable terminal billing") ────────────
+// Reached ONLY when a charge returns insufficient_scope — there is no preflight
+// or scope check anywhere; the buy path discovers it reactively. The modal stays
+// MOUNTED through the browser device-flow:
+//   prompt (heads-up) → waiting (browser authorize) → granted (press Enter to
+//   resume) → replay the held charge (pendingCharge.amount) → settle → close.
+// Never leaks the raw billing:manage scope — the user-facing concept is
+// "terminal billing".
 
 function StepUpScreen({
   amount,
@@ -442,36 +432,48 @@ function StepUpScreen({
   t: Theme
 }) {
   const [sel, setSel] = useState(0)
-  const [phase, setPhase] = useState<'prompt' | 'waiting'>('prompt')
+  const [phase, setPhase] = useState<'granted' | 'prompt' | 'resuming' | 'waiting'>('prompt')
 
   const allow = () => {
-    if (phase === 'waiting') {
+    if (phase !== 'prompt') {
       return
     }
 
     setPhase('waiting')
-    ctx.sys('Opening your browser to authorize Remote Spending…')
+    ctx.sys('Opening your browser to enable terminal billing…')
 
     void ctx.requestRemoteSpending().then(granted => {
       if (!granted) {
-        ctx.sys('🟡 Remote Spending was not granted (an org admin/owner must approve). Run /topup to try again.')
+        ctx.sys("! Couldn't enable terminal billing — an org admin or owner has to approve it. Your card was not charged.")
         onClose()
 
         return
       }
 
-      // Granted → resume the held charge. Replay it; the confirm/poll lines
-      // report settlement, then close.
-      ctx.sys('✅ Remote Spending enabled — resuming your purchase.')
-      void ctx.charge(amount).then(() => onClose())
+      // Granted → hold here and wait for an explicit Enter to resume the held
+      // purchase (the reassuring "you're back, press Enter" beat).
+      setPhase('granted')
     })
   }
 
-  const decline = () => onClose()
+  const resume = () => {
+    if (phase !== 'granted') {
+      return
+    }
+
+    setPhase('resuming')
+    ctx.sys('✓ Terminal billing enabled — resuming your purchase.')
+    void ctx.charge(amount).then(() => onClose())
+  }
+
+  const decline = () => {
+    ctx.sys('No charge made. Run /topup when you want to enable terminal billing.')
+    onClose()
+  }
 
   useInput((ch, key) => {
-    if (phase === 'waiting') {
-      // While the device flow runs, only Esc (give up) is live.
+    if (phase === 'waiting' || phase === 'resuming') {
+      // While the device flow / replay runs, only Esc (give up) is live.
       if (key.escape) {
         onClose()
       }
@@ -479,6 +481,20 @@ function StepUpScreen({
       return
     }
 
+    if (phase === 'granted') {
+      // Back from the browser — Enter resumes, Esc abandons.
+      if (key.escape) {
+        return onClose()
+      }
+
+      if (key.return) {
+        return resume()
+      }
+
+      return
+    }
+
+    // phase === 'prompt'
     if (key.escape) {
       return decline()
     }
@@ -510,25 +526,55 @@ function StepUpScreen({
     return (
       <Box flexDirection="column">
         <Text bold color={t.color.accent}>
-          Allow Remote Spending
+          Enable terminal billing
         </Text>
-        <Text color={t.color.muted}>Waiting for browser authorization…</Text>
-        <Text color={t.color.muted}>Approve in the page that just opened — your purchase resumes here automatically.</Text>
+        <Text color={t.color.warn}>Waiting for your browser…</Text>
+        <Text color={t.color.muted}>Approve in the page that just opened.</Text>
+        <Text color={t.color.muted}>Your ${amount} top-up is held here and resumes when you&apos;re done.</Text>
         <Text />
         {footer('Esc cancel', t)}
       </Box>
     )
   }
 
+  if (phase === 'granted') {
+    return (
+      <Box flexDirection="column">
+        <Text bold color={t.color.ok}>
+          Terminal billing enabled
+        </Text>
+        <Text color={t.color.text}>Your ${amount} top-up is ready to finish.</Text>
+        <Text />
+        <ActionRow active color={t.color.ok} label="Press Enter to resume" t={t} />
+        <Text />
+        {footer('Enter resume · Esc cancel', t)}
+      </Box>
+    )
+  }
+
+  if (phase === 'resuming') {
+    return (
+      <Box flexDirection="column">
+        <Text bold color={t.color.accent}>
+          Enable terminal billing
+        </Text>
+        <Text color={t.color.muted}>Resuming your ${amount} top-up…</Text>
+        <Text />
+        {footer('Esc cancel', t)}
+      </Box>
+    )
+  }
+
+  // phase === 'prompt' — the one heads-up, triggered only by the 403.
   return (
     <Box flexDirection="column">
-      <Text bold color={t.color.accent}>
-        Allow Remote Spending
+      <Text bold color={t.color.warn}>
+        One-time setup
       </Text>
-      <Text color={t.color.text}>Charging from the terminal needs a one-time browser authorization.</Text>
-      <Text color={t.color.muted}>We&apos;ll resume your ${amount} purchase right here once it&apos;s granted.</Text>
+      <Text color={t.color.text}>To charge this terminal, enable terminal billing once.</Text>
+      <Text color={t.color.muted}>It opens your browser to authorize, then your ${amount} top-up picks up right here.</Text>
       <Text />
-      <ActionRow active={sel === 0} color={t.color.ok} label="Allow Remote Spending" t={t} />
+      <ActionRow active={sel === 0} color={t.color.ok} label="Enable terminal billing" t={t} />
       <ActionRow active={sel === 1} label="Not now" t={t} />
       <Text />
       {footer('↑/↓ select · Enter confirm · Y/N quick · Esc cancel', t)}
@@ -701,7 +747,7 @@ function AutoReloadScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
       <Text bold color={t.color.accent}>
         Auto-reload
       </Text>
-      <Text color={t.color.muted}>Automatically buy more credits when your balance is low.</Text>
+      <Text color={t.color.muted}>Automatically add funds when your balance is low.</Text>
       <Text color={t.color.muted}>{cardLine}</Text>
       <Text />
       {fieldBox('When balance falls below:', threshold, setThreshold, row === 0, 'threshold')}

@@ -302,7 +302,7 @@ describe('/billing slash command (overlay-driven)', () => {
     await Promise.resolve()
     await Promise.resolve()
     const out = printed(sys)
-    expect(out).toContain('An admin stopped this terminal')
+    expect(out).toContain('An admin turned off terminal billing for this terminal')
     expect(out).toContain('Reconnect to restore')
     // Spend UI is killed immediately — no zombie button waiting for refresh.
     expect(getOverlayState().billing).toBeNull()
@@ -318,7 +318,7 @@ describe('/billing slash command (overlay-driven)', () => {
     getOverlayState().billing!.ctx.charge('100')
     await Promise.resolve()
     await Promise.resolve()
-    expect(printed(sys)).toContain('You stopped this terminal')
+    expect(printed(sys)).toContain('You turned off terminal billing for this terminal')
     expect(getOverlayState().billing).toBeNull()
   })
 
@@ -354,7 +354,7 @@ describe('/billing slash command (overlay-driven)', () => {
     await Promise.resolve()
     await Promise.resolve()
     const out = printed(sys)
-    expect(out).toContain('Remote Spending is off for this account')
+    expect(out).toContain('Terminal billing is off for this account')
     // Account-wide switch is NOT a per-terminal revoke — overlay stays open.
     expect(getOverlayState().billing).toBeTruthy()
   })

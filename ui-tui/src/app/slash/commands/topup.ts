@@ -35,21 +35,22 @@ const renderBillingError = (
 
   switch (env.error) {
     case 'insufficient_scope':
-      // Reached by non-charge mutations (e.g. auto-reload config) that need the
-      // Remote-Spending grant. The resumable step-up lives on the buy/charge
+      // Reached by non-charge mutations (e.g. auto-reload config) that need
+      // terminal billing enabled. The resumable step-up lives on the buy/charge
       // path; point the user there rather than leaking the raw scope name.
-      sys('💳 This needs Remote Spending authorization. Start a credit purchase to authorize, then retry.')
+      sys('This needs terminal billing enabled. Start a top-up to enable it, then retry.')
 
       break
-
     case 'remote_spending_revoked': {
       // CF-4: this terminal's spend was revoked. Kill the spend UI NOW (don't
       // wait for the token refresh ~15 min away) and tell the user who did it.
       patchOverlayState({ billing: null })
+
       const who = env.actor === 'admin'
-        ? 'An admin stopped this terminal’s spending.'
-        : 'You stopped this terminal’s spending.'
-      sys(`🔴 ${who} Reconnect to restore — run /portal to re-authorize this terminal.`)
+        ? 'An admin turned off terminal billing for this terminal.'
+        : 'You turned off terminal billing for this terminal.'
+
+      sys(`${who} Reconnect to restore — run /portal to re-authorize this terminal.`)
 
       return
     }
@@ -57,20 +58,21 @@ const renderBillingError = (
     case 'session_revoked':
       // Stronger than a spend-revoke: the whole session is gone → full re-login.
       patchOverlayState({ billing: null })
-      sys('🔴 Your session was logged out. Run /portal to log in again.')
+      sys('Your session was logged out. Run /portal to log in again.')
 
       return
 
     case 'cli_billing_disabled':
+
     case 'remote_spending_disabled':
       // Account-wide switch is OFF (dual-emitted error/code). An admin must flip
       // it on the portal; this is NOT a per-terminal revoke.
-      sys('🔴 Remote Spending is off for this account — an admin must enable it on the portal.')
+      sys('Terminal billing is off for this account — an admin must enable it on the portal.')
 
       break
 
     case 'role_required':
-      sys('🔴 Buying credits needs an org admin/owner. Ask an admin, or manage on the portal.')
+      sys('Adding funds needs an org admin/owner. Ask an admin, or manage on the portal.')
 
       break
 
@@ -86,7 +88,6 @@ const renderBillingError = (
       )
 
       break
-
     case 'monthly_cap_exceeded': {
       // Surface the remaining headroom the server attaches (parity with the CLI).
       const remaining = env.payload?.remainingUsd
@@ -94,6 +95,7 @@ const renderBillingError = (
 
       break
     }
+
     case 'rate_limited':
     case 'temporarily_unavailable': {
       // 429 throttle OR 503 gate-fail-closed: NOT a payment failure, NOT a
@@ -186,6 +188,7 @@ const pollCharge = (sys: Sys, ctx: SlashRunCtx, chargeId: string, portalUrl?: st
               '🟡 Still processing after 5 minutes — this is a timeout, not a failure. ' +
                 'Check /billing or the portal shortly.'
             )
+
             if (portalUrl) {
               sys(`Portal: ${portalUrl}`)
             }
@@ -326,7 +329,7 @@ const buildOverlayCtx = (ctx: SlashRunCtx, sys: Sys, s: BillingStateResponse): B
 
 export const topupCommands: SlashCommand[] = [
   {
-    help: 'Top up Nous credits — buy credits, auto-reload, limits',
+    help: 'Top up your balance — add funds, auto-reload, limits',
     name: 'topup',
     // ZERO sub-commands (plan §0.4): any arg is ignored. Bare `/billing`
     // fetches state and opens the interactive overlay (CLI/TUI parity).
