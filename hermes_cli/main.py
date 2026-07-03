@@ -13374,13 +13374,27 @@ def main():
     )
 
     sessions_export = sessions_subparsers.add_parser(
-        "export", help="Export sessions to a JSONL file"
+        "export", help="Export sessions to JSONL (default) or Markdown"
     )
     sessions_export.add_argument(
-        "output", help="Output JSONL file path (use - for stdout)"
+        "output", help="Output file path (use - for stdout)"
     )
     sessions_export.add_argument("--source", help="Filter by source")
     sessions_export.add_argument("--session-id", help="Export a specific session")
+    sessions_export.add_argument(
+        "--only",
+        choices=["user-prompts"],
+        help=(
+            "Only export user-authored prompts. "
+            "Excludes assistant messages, tool calls, and system messages."
+        ),
+    )
+    sessions_export.add_argument(
+        "--format",
+        choices=["jsonl", "markdown"],
+        default="jsonl",
+        help="Output format (default: jsonl)",
+    )
 
     sessions_delete = sessions_subparsers.add_parser(
         "delete", help="Delete a specific session"
@@ -13555,25 +13569,89 @@ def main():
                 if not data:
                     print(f"Session '{args.session_id}' not found.")
                     return
-                line = _json.dumps(data, ensure_ascii=False) + "\n"
-                if args.output == "-":
 
-                    sys.stdout.write(line)
+                if getattr(args, "only", None) == "user-prompts":
+                    from hermes_cli.session_export import (
+                        render_prompt_only_jsonl,
+                        render_prompt_only_md,
+                    )
+
+                    if args.format == "markdown":
+                        output = render_prompt_only_md(data)
+                    else:
+                        output = render_prompt_only_jsonl(data)
+                    if args.output == "-":
+
+                        sys.stdout.write(output)
+                    else:
+                        with open(args.output, "w", encoding="utf-8") as f:
+                            f.write(output)
+                        print(f"Exported 1 session to {args.output}")
+                elif args.format == "markdown":
+                    from hermes_cli.session_export import render_full_session_md
+
+                    output = render_full_session_md(data)
+                    if args.output == "-":
+
+                        sys.stdout.write(output)
+                    else:
+                        with open(args.output, "w", encoding="utf-8") as f:
+                            f.write(output)
+                        print(f"Exported 1 session to {args.output}")
                 else:
-                    with open(args.output, "w", encoding="utf-8") as f:
-                        f.write(line)
-                    print(f"Exported 1 session to {args.output}")
+                    line = _json.dumps(data, ensure_ascii=False) + "\n"
+                    if args.output == "-":
+
+                        sys.stdout.write(line)
+                    else:
+                        with open(args.output, "w", encoding="utf-8") as f:
+                            f.write(line)
+                        print(f"Exported 1 session to {args.output}")
             else:
-                sessions = db.export_all(source=args.source)
-                if args.output == "-":
+                only = getattr(args, "only", None)
+                fmt = args.format
+                if only == "user-prompts" or fmt == "markdown":
+                    from hermes_cli.session_export import (
+                        render_prompt_only_jsonl,
+                        render_prompt_only_md,
+                        render_full_session_md,
+                    )
 
+                    sessions = db.export_all(source=args.source)
+                    output_lines: list[str] = []
                     for s in sessions:
-                        sys.stdout.write(_json.dumps(s, ensure_ascii=False) + "\n")
+                        if only == "user-prompts":
+                            if fmt == "markdown":
+                                output_lines.append(render_prompt_only_md(s))
+                                output_lines.append("")
+                            else:
+                                output_lines.append(
+                                    render_prompt_only_jsonl(s).rstrip("\n")
+                                )
+                        else:
+                            # --format markdown without --only
+                            output_lines.append(render_full_session_md(s))
+                            output_lines.append("")
+                    output = "\n".join(output_lines) + "\n"
+                    if args.output == "-":
+
+                        sys.stdout.write(output)
+                    else:
+                        with open(args.output, "w", encoding="utf-8") as f:
+                            f.write(output)
+                        plural = "sessions" if len(sessions) != 1 else "session"
+                        print(f"Exported {len(sessions)} {plural} to {args.output}")
                 else:
-                    with open(args.output, "w", encoding="utf-8") as f:
+                    sessions = db.export_all(source=args.source)
+                    if args.output == "-":
+
                         for s in sessions:
-                            f.write(_json.dumps(s, ensure_ascii=False) + "\n")
-                    print(f"Exported {len(sessions)} sessions to {args.output}")
+                            sys.stdout.write(_json.dumps(s, ensure_ascii=False) + "\n")
+                    else:
+                        with open(args.output, "w", encoding="utf-8") as f:
+                            for s in sessions:
+                                f.write(_json.dumps(s, ensure_ascii=False) + "\n")
+                        print(f"Exported {len(sessions)} sessions to {args.output}")
 
         elif action == "delete":
             resolved_session_id = db.resolve_session_id(args.session_id)
