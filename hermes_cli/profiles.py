@@ -196,32 +196,20 @@ def _clone_all_copytree_ignore(source_dir: Path):
     return _ignore
 
 
-# Directories/files to exclude when exporting the default (~/.hermes) profile.
-# The default profile contains infrastructure (repo checkout, worktrees, DBs,
-# caches, binaries) that named profiles don't have.  We exclude those so the
-# export is a portable, reasonable-size archive of actual profile data.
-_DEFAULT_EXPORT_EXCLUDE_ROOT = frozenset({
-    # Infrastructure
-    "hermes-agent",         # repo checkout (multi-GB)
-    ".worktrees",           # git worktrees
-    "profiles",             # other profiles — never recursive-export
-    "bin",                  # installed binaries (tirith, etc.)
-    "node_modules",         # npm packages
-    # Databases & runtime state
-    "state.db", "state.db-shm", "state.db-wal",
-    "hermes_state.db",
-    "response_store.db", "response_store.db-shm", "response_store.db-wal",
-    "gateway.pid", "gateway_state.json", "processes.json",
-    "auth.json",            # API keys, OAuth tokens, credential pools
-    ".env",                 # API keys (dotenv)
-    "auth.lock", "active_profile", ".update_check",
-    "errors.log",
-    ".hermes_history",
-    # Caches (regenerated on use)
-    "image_cache", "audio_cache", "document_cache",
-    "browser_screenshots", "checkpoints",
-    "sandboxes",
-    "logs",                 # gateway logs
+# Directories/files to include when exporting the default profile.
+# Using an allowlist (rather than a blocklist) ensures only actual profile
+# data is exported — critical when HERMES_HOME points to a directory that
+# also contains non-Hermes files (Docker deployments, shared volumes, etc.).
+_DEFAULT_EXPORT_ALLOW_ROOT = frozenset({
+    "skills",
+    "cron",
+    "scripts",
+    "sessions",
+    "plugins",
+    "memories",
+    "config.yaml",
+    "SOUL.md",
+    "contribute-tracker.json",
 })
 
 # Names that cannot be used as profile aliases
@@ -1843,7 +1831,7 @@ def get_active_profile_name() -> str:
 def _default_export_ignore(root_dir: Path):
     """Return an *ignore* callable for :func:`shutil.copytree`.
 
-    At the root level it excludes everything in ``_DEFAULT_EXPORT_EXCLUDE_ROOT``.
+    At the root level it keeps only items in ``_DEFAULT_EXPORT_ALLOW_ROOT``.
     At all levels it excludes ``__pycache__``, sockets, and temp files.
     """
 
@@ -1853,12 +1841,9 @@ def _default_export_ignore(root_dir: Path):
             # Universal exclusions (any depth)
             if entry == "__pycache__" or entry.endswith((".sock", ".tmp")):
                 ignored.add(entry)
-            # npm lockfiles can appear at root
-            elif entry in {"package.json", "package-lock.json"}:
-                ignored.add(entry)
-        # Root-level exclusions
+        # Root-level: only allow known profile-artifact names
         if Path(directory) == root_dir:
-            ignored.update(c for c in contents if c in _DEFAULT_EXPORT_EXCLUDE_ROOT)
+            ignored.update(c for c in contents if c not in _DEFAULT_EXPORT_ALLOW_ROOT)
         return ignored
 
     return _ignore
@@ -1890,6 +1875,7 @@ def export_profile(name: str, output_path: str) -> Path:
             shutil.copytree(
                 profile_dir,
                 staged,
+                symlinks=True,
                 ignore=_default_export_ignore(profile_dir),
             )
             result = shutil.make_archive(base, "gztar", tmpdir, "default")
